@@ -2,20 +2,21 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	defaultPort       = 9999             // Default port for gossip communication
+	defaultPort       = 4709             // Default port for gossip communication
 	bufSize           = 1024             // Buffer size for UDP packets
 	gossipInterval    = 2 * time.Second  // How often to send gossip messages
 	timeoutInterval   = 10 * time.Second // Time after which a node is considered dead
@@ -62,7 +63,7 @@ func NewService(nodeName string, discoveryHost string, port int) (*Service, erro
 	nodeID := generateNodeID()
 
 	// Get the local IP address
-	localIP, err := getLocalIP()
+	localIP, err := getBestLocalIP()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get local IP: %w", err)
 	}
@@ -343,8 +344,60 @@ func (s *Service) cleanupStaleNodes() {
 	}
 }
 
-// getLocalIP returns the non-loopback local IP of the host
-func getLocalIP() (string, error) {
+// getBestLocalIP attempts to determine the best IP address to use for gossiping,
+// trying to find Docker host IP if possible
+func getBestLocalIP() (string, error) {
+	// First try to get Docker host IP via gateway or environment variables
+	dockerHostIP := getDockerHostIP()
+	if dockerHostIP != "" {
+		log.Printf("Using Docker host IP: %s", dockerHostIP)
+		return dockerHostIP, nil
+	}
+
+	// If that fails, fall back to container's IP
+	return getContainerIP()
+}
+
+// getDockerHostIP attempts several methods to find the Docker host IP
+func getDockerHostIP() string {
+	// Method 1: Check if Docker host address is defined by environment variable
+	if hostIP := os.Getenv("DOCKER_HOST_IP"); hostIP != "" {
+		return hostIP
+	}
+
+	// Method 2: Try to get the gateway IP by looking at routes
+	routes, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, route := range routes {
+			if ipnet, ok := route.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipnet.IP.To4() != nil {
+					// Try to get the default gateway (typically .1 in the subnet)
+					ipParts := strings.Split(ipnet.IP.String(), ".")
+					if len(ipParts) == 4 {
+						// Guess that the gateway is likely to be X.X.X.1
+						gateway := fmt.Sprintf("%s.%s.%s.1", ipParts[0], ipParts[1], ipParts[2])
+						if gateway != ipnet.IP.String() { // Avoid using our own IP
+							return gateway
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Method 3: Check if we can resolve special Docker DNS names
+	// In some Docker setups, 'host.docker.internal' points to the host
+	ips, err := net.LookupIP("host.docker.internal")
+	if err == nil && len(ips) > 0 {
+		return ips[0].String()
+	}
+
+	// No Docker host IP found
+	return ""
+}
+
+// getContainerIP returns the container's own IP address
+func getContainerIP() (string, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return "", err
@@ -368,10 +421,6 @@ func generateNodeID() string {
 }
 
 func main() {
-	// Parse command-line flags
-	port := flag.Int("port", defaultPort, "UDP port to use for gossip communication")
-	flag.Parse()
-
 	// Check for JOYRIDE_NODENAME environment variable
 	nodeName := os.Getenv("JOYRIDE_NODENAME")
 	if nodeName == "" {
@@ -384,6 +433,16 @@ func main() {
 		}
 	}
 
+	// Get port from environment variable or use default
+	port := defaultPort
+	if portStr := os.Getenv("JOYRIDE_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		} else {
+			log.Printf("Invalid JOYRIDE_PORT value: %s, using default: %d", portStr, defaultPort)
+		}
+	}
+
 	// Get discovery hostname from environment variable or use default
 	discoveryHost := os.Getenv("DISCOVER_HOSTNAME")
 	if discoveryHost == "" {
@@ -391,7 +450,7 @@ func main() {
 	}
 
 	// Create and start the gossip service
-	service, err := NewService(nodeName, discoveryHost, *port)
+	service, err := NewService(nodeName, discoveryHost, port)
 	if err != nil {
 		log.Fatalf("Failed to create gossip service: %v", err)
 	}
