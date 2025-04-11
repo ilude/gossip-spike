@@ -1,0 +1,11 @@
+-include .env
+
+run: .env build
+	docker run --rm --name gossip-server -p ${JOYRIDE_PORT:-4709}:${JOYRIDE_PORT:-4709} -env-file .env gossip-server
+
+.env:
+	touch .env
+
+build:
+	docker build -t gossip-server .
+	
