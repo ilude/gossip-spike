@@ -6,5 +6,4 @@ RUN go build -o gossip-server .
 FROM alpine:3.21
 WORKDIR /app
 COPY --from=builder /app/gossip-server /app/
-EXPOSE 9999/udp
 CMD ["/app/gossip-server"]

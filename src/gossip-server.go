@@ -310,7 +310,7 @@ func (s *Service) updateNode(msg Message, senderIP string) {
 		nodeAddr = senderIP
 	}
 
-	node, exists := s.nodes[msg.NodeID]
+	_, exists := s.nodes[msg.NodeID]
 	if !exists {
 		// New node discovered
 		log.Printf("Discovered new node: %s (%s) at %s", msg.NodeName, msg.NodeID, nodeAddr)
