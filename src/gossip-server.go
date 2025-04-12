@@ -82,7 +82,7 @@ func GossipService() (*Service, error) {
 	}
 
 	// Get discovery hostname from environment or use default
-	discoveryHost := os.Getenv("DISCOVER_HOSTNAME")
+	discoveryHost := os.Getenv("DISCOVER_HOST")
 	if discoveryHost == "" {
 		discoveryHost = defaultHostname
 	}
