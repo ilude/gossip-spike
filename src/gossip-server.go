@@ -41,18 +41,16 @@ type Message struct {
 
 // Service manages the gossip discovery
 type Service struct {
-	nodeID         string
-	nodeName       string
-	localAddr      string
-	udpConn        *net.UDPConn
-	nodes          map[string]Node
-	nodesMutex     sync.RWMutex
-	stopChan       chan struct{}
-	wg             sync.WaitGroup
-	discoveryHost  string
-	discoveryPort  int
-	knownAddrs     map[string]bool
-	knownAddrMutex sync.RWMutex
+	nodeID        string
+	nodeName      string
+	localAddr     string
+	udpConn       *net.UDPConn
+	nodes         map[string]Node
+	nodesMutex    sync.RWMutex
+	stopChan      chan struct{}
+	wg            sync.WaitGroup
+	discoveryHost string
+	discoveryPort int
 }
 
 // GossipService creates a new gossip discovery service
@@ -108,20 +106,11 @@ func GossipService() (*Service, error) {
 		stopChan:      make(chan struct{}),
 		discoveryHost: discoveryHost,
 		discoveryPort: port,
-		knownAddrs:    make(map[string]bool),
 	}, nil
 }
 
 // Start begins the gossip service
 func (s *Service) Start() {
-	s.wg.Add(3) // Three goroutines: receive, broadcast, DNS discovery
-	go s.receiveGossip()
-	go s.broadcastLoop()
-	go s.dnsDiscoveryLoop()
-
-	log.Printf("Gossip service started. Node ID: %s, Name: %s, IP: %s", s.nodeID, s.nodeName, s.localAddr)
-	log.Printf("Using DNS discovery with hostname: %s on port: %d", s.discoveryHost, s.discoveryPort)
-
 	// Register self in the nodes map
 	s.nodesMutex.Lock()
 	s.nodes[s.nodeID] = Node{
@@ -131,6 +120,14 @@ func (s *Service) Start() {
 		LastSeen: time.Now(),
 	}
 	s.nodesMutex.Unlock()
+
+	s.wg.Add(2) // Three goroutines: receive, broadcast, DNS discovery
+	go s.receiveGossip()
+	go s.broadcastLoop()
+	//go s.dnsDiscoveryLoop()
+
+	log.Printf("Gossip service started. Node ID: %s, Name: %s, IP: %s", s.nodeID, s.nodeName, s.localAddr)
+	s.tryDiscoverHost()
 }
 
 // Stop halts the gossip service
@@ -149,42 +146,17 @@ func (s *Service) GetNodes() []Node {
 	nodes := make([]Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
 		nodes = append(nodes, node)
-		// Uncomment the following lines to filter nodes based on last seen time
-		// Only include nodes seen recently
-		// if time.Since(node.LastSeen) < timeoutInterval {
-		// 	nodes = append(nodes, node)
-		// }
 	}
 	return nodes
 }
 
-// dnsDiscoveryLoop periodically performs DNS lookups to discover peers
-func (s *Service) dnsDiscoveryLoop() {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(dnsLookupInterval)
-	defer ticker.Stop()
-
-	// Run DNS discovery immediately at startup
-	s.performDNSDiscovery()
-
-	for {
-		select {
-		case <-ticker.C:
-			s.performDNSDiscovery()
-		case <-s.stopChan:
-			return
-		}
-	}
-}
-
 // performDNSDiscovery looks up the discovery hostname and sends gossip messages
 // to any newly discovered IP addresses
-func (s *Service) performDNSDiscovery() {
+func (s *Service) tryDiscoverHost() {
 
 	var ips []net.IP
 
-	log.Printf("running DNS discovery for hostname %s", s.discoveryHost)
+	log.Printf("trying to locate discovery host: %s", s.discoveryHost)
 
 	if ip := net.ParseIP(s.discoveryHost); ip != nil {
 		ips = []net.IP{ip}
@@ -204,34 +176,9 @@ func (s *Service) performDNSDiscovery() {
 	}
 
 	// Process discovered IPs
-	newFound := false
-	s.knownAddrMutex.Lock()
-	defer s.knownAddrMutex.Unlock()
-
 	for _, ip := range ips {
-		ipStr := ip.String()
-
-		// Skip our own IP
-		if ipStr == s.localAddr {
-			continue
-		}
-
-		// Check if this is a new IP
-		if _, known := s.knownAddrs[ipStr]; !known {
-			log.Printf("Discovered new peer via DNS: %s", ipStr)
-			s.knownAddrs[ipStr] = true
-			newFound = true
-
-			// Send an immediate gossip message to this new peer
-			go s.sendGossipMessageTo(ipStr)
-		} else {
-			log.Printf("Already known peer: %s", ipStr)
-		}
-	}
-
-	if newFound {
-		// If we found new peers, send a gossip message to everyone
-		go s.broadcastToAllPeers()
+		log.Printf("Sending discovery message to %s", ip.String())
+		s.sendGossipMessageTo(ip.String())
 	}
 }
 
@@ -255,16 +202,31 @@ func (s *Service) broadcastLoop() {
 
 // broadcastToAllPeers sends a gossip message to all known peer addresses
 func (s *Service) broadcastToAllPeers() {
-	s.knownAddrMutex.RLock()
-	defer s.knownAddrMutex.RUnlock()
-
-	for addr := range s.knownAddrs {
-		s.sendGossipMessageTo(addr)
+	s.nodesMutex.RLock()
+	defer s.nodesMutex.RUnlock()
+	// loop through nodes and send a message to each
+	for _, node := range s.nodes {
+		// Skip our own node, we don't need to send a message to ourselves
+		if node.ID != s.nodeID {
+			// Send a heartbeat message to each node
+			log.Printf("Sending broadcast message to %s", node.Addr)
+			s.sendGossipMessageTo(node.Addr)
+		}
 	}
 }
 
 // sendGossipMessageTo sends a heartbeat message to a specific IP address
 func (s *Service) sendGossipMessageTo(ipAddr string) {
+	if ipAddr == "" {
+		log.Println("No IP address provided for gossip message")
+		return
+	}
+	if ipAddr == s.localAddr {
+		log.Printf("Skipping sending message to self (%s)", s.localAddr)
+		return
+	}
+
+	// Create a heartbeat message
 	msg := Message{
 		Type:      "heartbeat",
 		NodeID:    s.nodeID,
@@ -289,6 +251,7 @@ func (s *Service) sendGossipMessageTo(ipAddr string) {
 		log.Printf("Error sending gossip message to %s: %v", ipAddr, err)
 		return
 	}
+	log.Printf("Sent gossip message to %s", ipAddr)
 }
 
 // receiveGossip listens for incoming gossip messages
@@ -327,12 +290,6 @@ func (s *Service) receiveGossip() {
 
 			// Add the sender to our known addresses
 			senderIP := addr.IP.String()
-			s.knownAddrMutex.Lock()
-			if _, known := s.knownAddrs[senderIP]; !known {
-				s.knownAddrs[senderIP] = true
-				log.Printf("Added new peer from incoming message: %s", senderIP)
-			}
-			s.knownAddrMutex.Unlock()
 
 			// Update node information
 			s.updateNode(msg, senderIP)
@@ -354,15 +311,23 @@ func (s *Service) updateNode(msg Message, senderIP string) {
 	if !exists {
 		// New node discovered
 		log.Printf("Discovered new node: %s (%s) at %s", msg.NodeName, msg.NodeID, nodeAddr)
+		s.nodes[msg.NodeID] = Node{
+			ID:       msg.NodeID,
+			Name:     msg.NodeName,
+			Addr:     nodeAddr,
+			LastSeen: time.Now(),
+		}
+	} else {
+		// Existing node, update its last seen time
+		node := s.nodes[msg.NodeID]
+		node.LastSeen = time.Now()
+		s.nodes[msg.NodeID] = node
+		log.Printf("Updated node: %s (%s) at %s", msg.NodeName, msg.NodeID, nodeAddr)
 	}
 
-	// Update or create node
-	s.nodes[msg.NodeID] = Node{
-		ID:       msg.NodeID,
-		Name:     msg.NodeName,
-		Addr:     nodeAddr,
-		LastSeen: time.Now(),
-	}
+	// Send a gossip message back to the sender
+	log.Printf("Sending gossip message to %s", senderIP)
+	s.sendGossipMessageTo(senderIP)
 }
 
 // cleanupStaleNodes removes nodes that haven't been seen recently

@@ -4,6 +4,11 @@ export DOCKER_BUILDKIT := 1
 export DOCKER_SCAN_SUGGEST := false
 export COMPOSE_DOCKER_CLI_BUILD := 1
 
+ifneq (,$(wildcard .env))
+	include .env
+	export
+endif
+
 ifndef DOCKER_HOST_IP
 	ifeq ($(OS),Windows_NT)
 		DOCKER_HOST_IP := $(shell powershell -noprofile -command '(Get-NetIPConfiguration | Where-Object {$$_.IPv4DefaultGateway -ne $$null -and $$_.NetAdapter.Status -ne "Disconnected"}).IPv4Address.IPAddress' )
