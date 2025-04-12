@@ -184,6 +184,8 @@ func (s *Service) performDNSDiscovery() {
 
 	var ips []net.IP
 
+	log.Printf("running DNS discovery for hostname %s", s.discoveryHost)
+
 	if ip := net.ParseIP(s.discoveryHost); ip != nil {
 		ips = []net.IP{ip}
 	} else {
@@ -222,6 +224,8 @@ func (s *Service) performDNSDiscovery() {
 
 			// Send an immediate gossip message to this new peer
 			go s.sendGossipMessageTo(ipStr)
+		} else {
+			log.Printf("Already known peer: %s", ipStr)
 		}
 	}
 
