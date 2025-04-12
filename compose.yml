@@ -1,0 +1,11 @@
+services:
+  joyride:
+    build: .
+    ports:
+      - ${JOYRIDE_PORT:-4709}:${JOYRIDE_PORT:-4709}
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    environment:
+      - DISCOVER_HOSTNAME=${DISCOVER_HOSTNAME:-joyride} 
+      - DISCOVER_PORT=${DISCOVER_PORT:-4709}
+      - DOCKER_HOST_IP=${DOCKER_HOST_IP:-host.docker.internal}

@@ -33,11 +33,20 @@ endif
 export DOCKER_COMMAND
 export DOCKER_SOCKET
 
-run: .env build
-	$(DOCKER_COMMAND) run --rm --name gossip-server  --env-file .env gossip-server
+start: build
+	$(DOCKER_COMMAND) compose up --remove-orphans --force-recreate -d
 
-build:
-	$(DOCKER_COMMAND) build -t gossip-server .
+up: build
+	$(DOCKER_COMMAND) compose up --remove-orphans --force-recreate
+
+down:
+	$(DOCKER_COMMAND) compose down --remove-orphans
+
+logs:
+	$(DOCKER_COMMAND) compose logs -f
+
+build: .env
+	$(DOCKER_COMMAND) compose build 
 
 .env:
 	touch .env

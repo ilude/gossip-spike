@@ -7,11 +7,9 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -57,10 +55,37 @@ type Service struct {
 	knownAddrMutex sync.RWMutex
 }
 
-// NewService creates a new gossip discovery service
-func NewService(nodeName string, discoveryHost string, port int) (*Service, error) {
+// GossipService creates a new gossip discovery service
+func GossipService() (*Service, error) {
 	// Generate a random ID for this node
 	nodeID := generateNodeID()
+
+	// Get node name from environment or default to hostname
+	nodeName := os.Getenv("JOYRIDE_NODENAME")
+	if nodeName == "" {
+		var err error
+		nodeName, err = os.Hostname()
+		if err != nil {
+			log.Printf("Error getting hostname: %v", err)
+			nodeName = "unknown-" + strconv.Itoa(rand.Intn(1000))
+		}
+	}
+
+	// Get port from environment or use default
+	port := defaultPort
+	if portStr := os.Getenv("DISCOVER_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		} else {
+			log.Printf("Invalid DISCOVER_PORT value: %s, using default: %d", portStr, defaultPort)
+		}
+	}
+
+	// Get discovery hostname from environment or use default
+	discoveryHost := os.Getenv("DISCOVER_HOSTNAME")
+	if discoveryHost == "" {
+		discoveryHost = defaultHostname
+	}
 
 	// Get the local IP address
 	localIP, err := getBestLocalIP()
@@ -123,10 +148,12 @@ func (s *Service) GetNodes() []Node {
 
 	nodes := make([]Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
+		nodes = append(nodes, node)
+		// Uncomment the following lines to filter nodes based on last seen time
 		// Only include nodes seen recently
-		if time.Since(node.LastSeen) < timeoutInterval {
-			nodes = append(nodes, node)
-		}
+		// if time.Since(node.LastSeen) < timeoutInterval {
+		// 	nodes = append(nodes, node)
+		// }
 	}
 	return nodes
 }
@@ -154,10 +181,18 @@ func (s *Service) dnsDiscoveryLoop() {
 // performDNSDiscovery looks up the discovery hostname and sends gossip messages
 // to any newly discovered IP addresses
 func (s *Service) performDNSDiscovery() {
-	ips, err := net.LookupIP(s.discoveryHost)
-	if err != nil {
-		log.Printf("DNS lookup failed for %s: %v", s.discoveryHost, err)
-		return
+
+	var ips []net.IP
+
+	if ip := net.ParseIP(s.discoveryHost); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		var err error
+		ips, err = net.LookupIP(s.discoveryHost)
+		if err != nil {
+			log.Printf("DNS lookup failed for %s: %v", s.discoveryHost, err)
+			return
+		}
 	}
 
 	// Check if we got any IPs
@@ -365,7 +400,14 @@ func getDockerHostIP() string {
 		return hostIP
 	}
 
-	// Method 2: Try to get the gateway IP by looking at routes
+	// Method 2: Check if we can resolve special Docker DNS names
+	// In some Docker setups, 'host.docker.internal' points to the host
+	ips, err := net.LookupIP("host.docker.internal")
+	if err == nil && len(ips) > 0 {
+		return ips[0].String()
+	}
+
+	// Method 3: Try to get the gateway IP by looking at routes
 	routes, err := net.InterfaceAddrs()
 	if err == nil {
 		for _, route := range routes {
@@ -383,13 +425,6 @@ func getDockerHostIP() string {
 				}
 			}
 		}
-	}
-
-	// Method 3: Check if we can resolve special Docker DNS names
-	// In some Docker setups, 'host.docker.internal' points to the host
-	ips, err := net.LookupIP("host.docker.internal")
-	if err == nil && len(ips) > 0 {
-		return ips[0].String()
 	}
 
 	// No Docker host IP found
@@ -418,67 +453,4 @@ func getContainerIP() (string, error) {
 func generateNodeID() string {
 	rand.Seed(time.Now().UnixNano())
 	return fmt.Sprintf("%x", rand.Int63())
-}
-
-func main() {
-	// Check for JOYRIDE_NODENAME environment variable
-	nodeName := os.Getenv("JOYRIDE_NODENAME")
-	if nodeName == "" {
-		// If not set, use the hostname as default
-		var err error
-		nodeName, err = os.Hostname()
-		if err != nil {
-			log.Printf("Error getting hostname: %v", err)
-			nodeName = fmt.Sprintf("unknown-%x", rand.Int31n(1000))
-		}
-	}
-
-	// Get port from environment variable or use default
-	port := defaultPort
-	if portStr := os.Getenv("JOYRIDE_PORT"); portStr != "" {
-		if p, err := strconv.Atoi(portStr); err == nil {
-			port = p
-		} else {
-			log.Printf("Invalid JOYRIDE_PORT value: %s, using default: %d", portStr, defaultPort)
-		}
-	}
-
-	// Get discovery hostname from environment variable or use default
-	discoveryHost := os.Getenv("DISCOVER_HOSTNAME")
-	if discoveryHost == "" {
-		discoveryHost = defaultHostname
-	}
-
-	// Create and start the gossip service
-	service, err := NewService(nodeName, discoveryHost, port)
-	if err != nil {
-		log.Fatalf("Failed to create gossip service: %v", err)
-	}
-
-	service.Start()
-
-	// Print discovered nodes periodically
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	// Handle graceful shutdown
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-
-	for {
-		select {
-		case <-ticker.C:
-			nodes := service.GetNodes()
-			log.Printf("Known nodes (%d):", len(nodes))
-			for _, node := range nodes {
-				log.Printf("  - %s (%s) at %s, last seen %s ago",
-					node.Name, node.ID, node.Addr,
-					time.Since(node.LastSeen).Round(time.Second))
-			}
-		case <-stop:
-			log.Println("Shutting down...")
-			service.Stop()
-			return
-		}
-	}
 }
