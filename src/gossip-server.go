@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -44,6 +43,7 @@ type Service struct {
 	nodeID        string
 	nodeName      string
 	localAddr     string
+	containerIP   string
 	udpConn       *net.UDPConn
 	nodes         map[string]Node
 	nodesMutex    sync.RWMutex
@@ -86,9 +86,14 @@ func GossipService() (*Service, error) {
 	}
 
 	// Get the local IP address
-	localIP, err := getBestLocalIP()
+	localIP, err := getDockerHostIP()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get local IP: %w", err)
+	}
+
+	containerIP, err := getContainerIP()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get container IP: %w", err)
 	}
 
 	// Create a UDP connection for gossip communication
@@ -101,6 +106,7 @@ func GossipService() (*Service, error) {
 		nodeID:        nodeID,
 		nodeName:      nodeName,
 		localAddr:     localIP,
+		containerIP:   containerIP,
 		udpConn:       conn,
 		nodes:         make(map[string]Node),
 		stopChan:      make(chan struct{}),
@@ -161,18 +167,25 @@ func (s *Service) tryDiscoverHost() {
 	if ip := net.ParseIP(s.discoveryHost); ip != nil {
 		ips = []net.IP{ip}
 	} else {
-		var err error
-		ips, err = net.LookupIP(s.discoveryHost)
+		found_ips, err := net.LookupIP(s.discoveryHost)
 		if err != nil {
 			log.Printf("DNS lookup failed for %s: %v", s.discoveryHost, err)
 			return
+		}
+		//exclude our own IP from the list
+		for _, ip := range found_ips {
+			if !s.isCurrentIP(ip) {
+				ips = append(ips, ip)
+			}
 		}
 	}
 
 	// Check if we got any IPs
 	if len(ips) == 0 {
-		log.Printf("No IPs found for hostname %s", s.discoveryHost)
+		log.Printf("No external IPs found for hostname %s", s.discoveryHost)
 		return
+	} else {
+		log.Printf("Found external IPs for %s: %v", s.discoveryHost, ips)
 	}
 
 	// Process discovered IPs
@@ -180,6 +193,20 @@ func (s *Service) tryDiscoverHost() {
 		log.Printf("Sending discovery message to %s", ip.String())
 		s.sendGossipMessageTo(ip.String())
 	}
+}
+
+func (s *Service) isCurrentIP(ip net.IP) bool {
+	// Check if the IP address is the same as the local address
+	if ip.String() == s.localAddr {
+		return true
+	}
+
+	// Check if the IP address is the same as the container IP
+	if ip.String() == s.containerIP {
+		return true
+	}
+
+	return false
 }
 
 // broadcastLoop periodically sends gossip messages
@@ -348,74 +375,37 @@ func (s *Service) cleanupStaleNodes() {
 	}
 }
 
-// getBestLocalIP attempts to determine the best IP address to use for gossiping,
-// trying to find Docker host IP if possible
-func getBestLocalIP() (string, error) {
-	// First try to get Docker host IP via gateway or environment variables
-	dockerHostIP := getDockerHostIP()
-	if dockerHostIP != "" {
-		log.Printf("Using Docker host IP: %s", dockerHostIP)
-		return dockerHostIP, nil
-	}
-
-	// If that fails, fall back to container's IP
-	return getContainerIP()
-}
-
 // getDockerHostIP attempts several methods to find the Docker host IP
-func getDockerHostIP() string {
+func getDockerHostIP() (string, error) {
 	// Method 1: Check if Docker host address is defined by environment variable
 	if hostIP := os.Getenv("DOCKER_HOST_IP"); hostIP != "" {
-		return hostIP
+		return hostIP, nil
 	}
 
 	// Method 2: Check if we can resolve special Docker DNS names
 	// In some Docker setups, 'host.docker.internal' points to the host
 	ips, err := net.LookupIP("host.docker.internal")
 	if err == nil && len(ips) > 0 {
-		return ips[0].String()
-	}
-
-	// Method 3: Try to get the gateway IP by looking at routes
-	routes, err := net.InterfaceAddrs()
-	if err == nil {
-		for _, route := range routes {
-			if ipnet, ok := route.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				if ipnet.IP.To4() != nil {
-					// Try to get the default gateway (typically .1 in the subnet)
-					ipParts := strings.Split(ipnet.IP.String(), ".")
-					if len(ipParts) == 4 {
-						// Guess that the gateway is likely to be X.X.X.1
-						gateway := fmt.Sprintf("%s.%s.%s.1", ipParts[0], ipParts[1], ipParts[2])
-						if gateway != ipnet.IP.String() { // Avoid using our own IP
-							return gateway
-						}
-					}
-				}
-			}
-		}
+		return ips[0].String(), nil
 	}
 
 	// No Docker host IP found
-	return ""
+	return getContainerIP()
 }
 
-// getContainerIP returns the container's own IP address
+// getContainerIP returns the IP address of the current container
 func getContainerIP() (string, error) {
-	addrs, err := net.InterfaceAddrs()
+	containerHost, err := os.Hostname()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get container hostname: %w", err)
 	}
 
-	for _, address := range addrs {
-		// Check the address type and if it's not a loopback
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String(), nil
-			}
-		}
+	ipAddr, err := net.ResolveIPAddr("ip", containerHost)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve container hostname: %w", err)
 	}
-	return "", fmt.Errorf("no suitable local IP address found")
+
+	return ipAddr.IP.String(), nil
 }
 
 // generateNodeID creates a random node identifier
