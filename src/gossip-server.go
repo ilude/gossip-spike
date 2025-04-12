@@ -278,7 +278,7 @@ func (s *Service) sendGossipMessageTo(ipAddr string) {
 		log.Printf("Error sending gossip message to %s: %v", ipAddr, err)
 		return
 	}
-	log.Printf("Sent gossip message to %s", ipAddr)
+	log.Printf("Sent gossip message to %s:%d", ipAddr, s.discoveryPort)
 }
 
 // receiveGossip listens for incoming gossip messages
@@ -294,8 +294,8 @@ func (s *Service) receiveGossip() {
 		default:
 			// Set a read deadline so we can check the stop channel periodically
 			s.udpConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-
 			n, addr, err := s.udpConn.ReadFromUDP(buffer)
+			log.Printf("Received %d bytes from %s", n, addr.String())
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
